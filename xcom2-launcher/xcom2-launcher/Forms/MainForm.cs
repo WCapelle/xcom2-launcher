@@ -292,6 +292,53 @@ namespace XCOM2Launcher.Forms
             UpdateLabels();
         }
 
+        private void UpdateConflictsForMods(List<ModEntry> mods)
+        {
+            NumConflicts = 0;
+            
+            foreach (var m in mods)
+            {
+                if (m.isActive)
+                {
+                    foreach (var classOverride in m.GetOverrides(true))
+                    {
+                        var oldClass = classOverride.OldClass;
+
+                        if (classOverride.OverrideType == ModClassOverrideType.UIScreenListener)
+                            oldClass += " (UIScreenListener)";
+
+                        conflicts_datagrid.Rows.Add(m.Name, oldClass, classOverride.NewClass);
+                    }
+                }
+                else
+                {
+                    foreach (var classOverride in m.GetOverrides(true))
+                    {
+                        foreach (var row in conflicts_datagrid.Rows.Cast<DataGridViewRow>())
+                        {
+                            var oldClass = classOverride.OldClass;
+
+                            if (classOverride.OverrideType == ModClassOverrideType.UIScreenListener)
+                                oldClass += " (UIScreenListener)";
+
+                            if ((string)row.Cells[0].Value == m.Name && (string)row.Cells[1].Value == oldClass && (string)row.Cells[2].Value == classOverride.NewClass)
+                            {
+                                conflicts_datagrid.Rows.Remove(row);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Conflict log
+            conflicts_textbox.Text = GetDuplicatesString() + GetOverridesString();
+
+            // Update Interface
+            modlist_ListObjectListView.UpdateObjects(mods);
+            UpdateLabels();
+        }
+
         private string GetDuplicatesString()
         {
             var str = new StringBuilder();
