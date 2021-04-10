@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -8,13 +9,19 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Newtonsoft.Json;
-using XCOM2Launcher.Forms;
+using Steamworks;
+using XCOM2Launcher.Helper;
 using FilePath = System.IO.Path;
 
 namespace XCOM2Launcher.Mod
 {
     public class ModEntry
     {
+        [JsonIgnore] public const string DEFAULT_AUTHOR_NAME = "Unknown";
+        [JsonIgnore] public const string MODFILE_DISABLE_POSTFIX = "-disabled";
+
+        [JsonIgnore] private static readonly log4net.ILog Log = log4net.LogManager.GetLogger(nameof(ModEntry));
+
         [JsonIgnore] private string _image;
 
         [JsonIgnore] private IEnumerable<ModClassOverride> _overrides;
@@ -26,39 +33,18 @@ namespace XCOM2Launcher.Mod
         public int Index { get; set; } = -1;
 
         [JsonIgnore]
-        public ModState State { get; set; } = ModState.None;
+        public ModState State { get; private set; } = ModState.None;
 
         public string ID { get; set; }
         public string Name { get; set; }
         public bool ManualName { get; set; } = false;
 
-        public string Author { get; set; } = "Unknown";
+        public string Author { get; set; } = DEFAULT_AUTHOR_NAME;
 	    public string Description { get; set; } = "";
 
-	    public string Path
-	    {
-		    get
-			{
-				string path = "";
-				if (Source == ModSource.SteamWorkshop)
-				{
-					foreach (var modPath in XCOM2Launcher.Settings.Instance.ModPaths)
-					{
-						if (modPath.Contains("workshop"))
-							path = modPath;
-					}
-					return FilePath.Combine(path, WorkshopID.ToString());
-				}
-				foreach (var modPath in XCOM2Launcher.Settings.Instance.ModPaths)
-				{
-					if (modPath.Contains("XcomGame"))
-						path = modPath;
-				}
-				return FilePath.Combine(path, ID);
-			}
-	    }
+	    public string Path { get; set; } = "";
 
-	    /// <summary>
+        /// <summary>
         ///     Size in bytes
         /// </summary>
         [DefaultValue(-1)]
@@ -78,6 +64,21 @@ namespace XCOM2Launcher.Mod
 
         public string Note { get; set; } = null;
 
+        /// <summary>
+        /// Contains workshop id's from all mods, that this mod requires to run properly (as reported from workshop).
+        /// </summary>
+        public List<long> Dependencies { get; set; } = new List<long>();
+
+        /// <summary>
+        /// Contains workshop id's from mods, that the should be ignored during dependency checks (optional).
+        /// </summary>
+        public List<long> IgnoredDependencies { get; set; } = new List<long>();
+
+        /// <summary>
+        /// Contains the tags that were downloaded from steam.
+        /// </summary>
+        public List<string> SteamTags { get; set; } = new List<string>();
+
 		[JsonIgnore]
 	    public bool HasBackedUpSettings => Settings.Count > 0;
 
@@ -96,15 +97,101 @@ namespace XCOM2Launcher.Mod
 	    [JsonIgnore]
 	    public string BrowserLink => GetWorkshopLink();
 
+        [Browsable(false)]
+        public IList<string> Tags { get; set; } = new List<string>();
+
+        public bool BuiltForWOTC { get; set; } = false;
+
+        public ModEntry() {}
+
+        public ModEntry(SteamUGCDetails_t workshopDetails)
+        {
+            if (workshopDetails.m_eResult != EResult.k_EResultOK)
+            {
+                return;
+            }
+
+            State = ModState.NotInstalled;
+            WorkshopID = (long)workshopDetails.m_nPublishedFileId.m_PublishedFileId;
+            Source = ModSource.SteamWorkshop;
+            Name = workshopDetails.m_rgchTitle;
+            Description = workshopDetails.m_rgchDescription;
+        }
+
+        public Classes.Mod.ModProperty GetProperty()
+        {
+            return new Classes.Mod.ModProperty(this);
+        }
 
 		#region Mod
 
-		public string GetDescription()
+		public string GetDescription(bool CleanBBCode = false)
 		{
-			if (!string.IsNullOrEmpty(Description))
-				return Description;
-			
-            return new ModInfo(GetModInfoFile()).Description;
+            string dsc;
+            if (!string.IsNullOrEmpty(Description))
+                dsc = Description;
+            else
+                dsc = new ModInfo(GetModInfoFile()).Description;
+
+            if (CleanBBCode)
+            {
+                dsc = dsc.Replace(@"\", @"\'5c");
+                dsc = dsc.Replace(@"{", @"\'7b");
+                dsc = dsc.Replace(@"}", @"\'7d");
+                Regex Regexp = new Regex(@"(?<!\\\\)\[(/?)(.*?)(?<!\\\\)\]");
+                dsc = Regexp.Replace(dsc, RTFEvaluator);
+                Regex replace_linebreaks = new Regex(@"[\r\n]{1,2}");
+                dsc = replace_linebreaks.Replace(dsc, @"\line ");
+                return @"{\rtf1\ansi " + dsc + "}";
+            }
+            return Description;
+        }
+
+        private string RTFEvaluator(Match match)
+        {
+            String output;
+            if (match.Groups[2].Value.StartsWith("url"))
+            {
+                if (match.Groups[1].Value == "/")
+                {
+                    return @"}}}";
+                }
+                else if (match.Groups[2].Value.Length > 3 && match.Groups[2].Value[3] == '=')
+                {
+                    return @"{\field{\*\fldinst{HYPERLINK """ + match.Groups[2].Value.Substring(4) + @"""}}{\fldrslt{\ul ";
+                }
+                else
+                {
+                    return @"{{{";
+                }
+            }
+            else
+            {
+                switch (match.Groups[2].Value)
+                {
+                    case "h1":
+                        output = @"{\fs20 \b ";
+                        break;
+                    case "strike":
+                        output = @"{\strike ";
+                        break;
+                    case "b":
+                        output = @"{\b ";
+                        break;
+                    case "i":
+                        output = @"{\i ";
+                        break;
+                    case "u":
+                        output = @"{\ul ";
+                        break;
+                    default:
+                        output = "";
+                        break;
+                }
+            }
+            if (output != "" && match.Groups[1].Value == "/")
+                output = "}";
+            return output;
         }
 
         public IEnumerable<ModClassOverride> GetOverrides(bool forceUpdate = false)
@@ -126,7 +213,19 @@ namespace XCOM2Launcher.Mod
                 return overrides;
             }
 
-            var sourceFiles = Directory.GetFiles(sourceDirectory, "*.uc", SearchOption.AllDirectories);
+
+            string[] sourceFiles;
+
+            try
+            {
+                sourceFiles = Directory.GetFiles(sourceDirectory, "*.uc", SearchOption.AllDirectories);
+            }
+            catch (IOException ex)
+            {
+                // We expect IOException because it happened in rare cases (Issue #122).
+                Log.Error("Unable to get files from directory: " + sourceDirectory, ex);
+                return overrides;
+            }
 
             Parallel.ForEach(sourceFiles, sourceFile =>
             {
@@ -153,7 +252,7 @@ namespace XCOM2Launcher.Mod
                         var newClass = FilePath.GetFileNameWithoutExtension(sourceFile);
                         lock (overrides)
                         {
-                            overrides.Add(new ModClassOverride(this, newClass, oldClass, ModClassOverrideType.UIScreenListener));
+                            overrides.Add(new ModClassOverride(this, newClass, oldClass, ModClassOverrideType.UIScreenListener, line));
                         }
                     }
                 }
@@ -172,36 +271,43 @@ namespace XCOM2Launcher.Mod
             var r = new Regex("^[+]?ModClassOverrides=\\(BaseGameClass=\"([^\"]+)\",ModClass=\"([^\"]+)\"\\)");
 
             return from line in File.ReadLines(file)
-                select r.Match(line.Replace(" ", ""))
+                select (l: line, match: r.Match(Regex.Replace(line, "\\s+", "")))
                 into m
-                where m.Success
-                select new ModClassOverride(this, m.Groups[2].Value, m.Groups[1].Value, ModClassOverrideType.Class);
+                where m.match.Success
+                select new ModClassOverride(this, m.match.Groups[2].Value, m.match.Groups[1].Value, ModClassOverrideType.Class, m.l);
         }
 
         public void ShowOnSteam()
         {
-			Process.Start("explorer", GetSteamLink());
+            Tools.StartProcess("explorer", GetSteamLink());
         }
 
-	    public void ShowInBrowser()
-		{
-			Process.Start(GetWorkshopLink());
-		}
+        public void ShowInBrowser()
+        {
+            Tools.StartProcess(GetWorkshopLink());
+        }
 
         public void ShowInExplorer()
         {
-            Process.Start("explorer", Path);
+            Tools.StartProcess("explorer", Path);
         }
 
         public string GetWorkshopLink()
         {
-            return "https://steamcommunity.com/sharedfiles/filedetails/?id=" + WorkshopID;
+            if (WorkshopID > 0)
+            {
+                return "https://steamcommunity.com/sharedfiles/filedetails/?id=" + WorkshopID;
+            }
+            return "";
         }
 
 	    public string GetSteamLink()
 	    {
-		    return "steam://url/CommunityFilePage/" + WorkshopID;
-
+            if (WorkshopID > 0)
+            {
+                return "steam://url/CommunityFilePage/" + WorkshopID;
+            }
+            return "";
 	    }
 
         public override string ToString()
@@ -211,35 +317,118 @@ namespace XCOM2Launcher.Mod
 
         public bool IsInModPath(string modPath)
         {
-            return 0 == string.Compare(modPath.TrimEnd('/', '\\'), FilePath.GetDirectoryName(Path), StringComparison.OrdinalIgnoreCase);
+            return string.Equals(modPath.TrimEnd('/', '\\'), FilePath.GetDirectoryName(Path), StringComparison.OrdinalIgnoreCase);
         }
 
-		#endregion Mod
+        #endregion Mod
+
+        #region Public Setters
+        public void SetState(ModState newState)
+        {
+            State = newState;
+        }
+
+        public void AddState(ModState newState)
+        {
+            State |= newState;
+        }
+
+        public void RemoveState(ModState newState)
+        {
+            State &= ~newState;
+        }
+
+        public void SetRequiresWOTC(bool NeedWOTC)
+        {
+            BuiltForWOTC = NeedWOTC;
+        }
+
+        public void RealizeSize(long newSize)
+        {
+            Size = newSize;
+        }
+
+        public void SetSource(ModSource newSource)
+        {
+            Source = newSource;
+        }
+
+        #endregion
 
 
-		#region Files
+        #region Files
 
-		public string[] GetConfigFiles()
+        public string[] GetConfigFiles()
         {
 			if (Directory.Exists(FilePath.Combine(Path,"Config")))
 				return Directory.GetFiles(FilePath.Combine(Path, "Config"), "*.ini", SearchOption.AllDirectories);
 	        return new string[0];
         }
 
+        public void EnableModFile()
+        {
+            string path = FilePath.Combine(Path, ID + ".XComMod" + MODFILE_DISABLE_POSTFIX);
+
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Move(path, path.Replace(MODFILE_DISABLE_POSTFIX, ""));
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"Error renaming mod info file {ex.Message}");
+                }
+            }
+        }
+
+        public void DisableModFile()
+        {
+            string path = FilePath.Combine(Path, ID + ".XComMod");
+
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Move(path, path + MODFILE_DISABLE_POSTFIX);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"Error renaming mod info file {ex.Message}");
+                }
+            }
+        }
+
+        public bool CheckModFileDisabled()
+        {
+            return File.Exists(FilePath.Combine(Path, ID + ".XComMod" + MODFILE_DISABLE_POSTFIX));
+        }
+
         internal string GetModInfoFile()
         {
-            return FilePath.Combine(Path, ID + ".XComMod");
+            string path = FilePath.Combine(Path, ID + ".XComMod");
+            
+            if (File.Exists(path))
+                return path;
+
+            path = FilePath.Combine(Path, ID + ".XComMod" + MODFILE_DISABLE_POSTFIX);
+
+            if (File.Exists(path))
+                return path;
+
+            return null;
         }
 
         public string GetReadMe()
         {
             try
             {
-                return File.ReadAllText(FilePath.Combine(Path, "ReadMe.txt"));
+                var readmePath = FilePath.Combine(Path, "ReadMe.txt");
+                return File.Exists(readmePath) ? File.ReadAllText(readmePath) : "No ReadMe found.";
             }
-            catch (IOException)
+            catch (Exception ex)
             {
-                return "No ReadMe found.";
+                return "Unable to access ReadMe.txt - " + ex.Message;
             }
         }
 
@@ -283,7 +472,7 @@ namespace XCOM2Launcher.Mod
 			var fullpath = GetPathFull(path);
 			if (!File.Exists(fullpath))
 			{
-				MessageBox.Show(@"Error!\nThe file " + path + @" does not belong to mod " + Name + @".\nNothing was saved.", @"Error", MessageBoxButtons.OK);
+				MessageBox.Show($"Error!\nThe file {path} does not belong to mod {Name}.\nNothing was saved.", @"Error", MessageBoxButtons.OK);
 				return false;
 			}
 
@@ -296,11 +485,20 @@ namespace XCOM2Launcher.Mod
 			else
 				setting.Contents = contents;
 
-			using (var stream = new StreamWriter(fullpath) )
-			{
-				stream.Write(contents);
-			}
-			return true;
+            try
+            {
+                using (var stream = new StreamWriter(fullpath))
+                {
+                    stream.Write(contents);
+                }
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Log.Warn("Error saving configuration file " + fullpath, ex);
+                MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            return true;
 
 	    }
 

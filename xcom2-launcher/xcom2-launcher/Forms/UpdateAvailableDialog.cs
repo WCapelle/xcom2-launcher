@@ -1,33 +1,39 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
+using Semver;
 using XCOM2Launcher.GitHub;
+using XCOM2Launcher.Helper;
 
 namespace XCOM2Launcher.Forms
 {
     public partial class UpdateAvailableDialog : Form
     {
-        public UpdateAvailableDialog(Release release, string currentVersion)
+        public string CurrentVersion { get; }
+        public string NewVersion { get; }
+        public Release Release { get; }
+
+        public UpdateAvailableDialog(Release release, SemVersion currentVersion, SemVersion newVersion)
         {
             InitializeComponent();
-            CurrentVersion = currentVersion;
+            CurrentVersion = currentVersion.ToString();
+            NewVersion = newVersion.ToString();
             Release = release;
 
             UpdateLabels();
         }
 
-        public string CurrentVersion { get; }
-
-        public Release Release { get; }
-
         private void UpdateLabels()
         {
             version_current_value_label.Text = CurrentVersion;
-            version_new_value_label.Text = Release.tag_name;
-            changelog_textbox.Text = Release.body;
+            version_new_value_label.Text = NewVersion;
+            changelog_textbox.AppendText(Release.name + Environment.NewLine + Environment.NewLine);
+            changelog_textbox.AppendText(Release.body);
             date_value_label.Text = Release.published_at.ToString(CultureInfo.CurrentCulture);
 
+            lBetaVersion.Visible = Release.prerelease;
 
             var asset = Release.assets.FirstOrDefault(a => a.name.EndsWith(".zip"));
 
@@ -42,7 +48,7 @@ namespace XCOM2Launcher.Forms
 
         private void show_button_Click(object sender, System.EventArgs e)
         {
-            Process.Start(Release.html_url);
+            Tools.StartProcess(Release.html_url);
         }
     }
 }
